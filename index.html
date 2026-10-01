@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1f2a2e">
+<title>SpeleoGIS</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<!--
+SUPABASE SETUP (SQL Editor):
+create extension if not exists postgis;
+create table features(id uuid primary key, geom jsonb, props jsonb default '{}', updated_at timestamptz default now(), deleted boolean default false);
+alter table features enable row level security;
+create policy "open" on features for all using (true) with check (true); -- für Produktion mit Auth einschränken
+alter publication supabase_realtime add table features;
+-->
+<style>
+:root{--bg:#1f2a2e;--fg:#e8e4d8;--ac:#e0a43a;--mut:#8fa1a6}
+*{box-sizing:border-box}html,body{height:100%;margin:0;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+#map{position:absolute;inset:0}
+#bar{position:absolute;top:env(safe-area-inset-top,0);left:0;right:0;display:flex;gap:6px;flex-wrap:wrap;padding:8px;z-index:2;pointer-events:none}
+#bar>*{pointer-events:auto}
+button{font:inherit;background:var(--bg);color:var(--fg);border:1px solid #3d4d52;border-radius:6px;padding:7px 11px;cursor:pointer}
+button.on{background:var(--ac);color:#1f2a2e;border-color:var(--ac)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--ac)}
+#st{align-self:center;background:var(--bg);padding:5px 9px;border-radius:6px;font-size:13px;color:var(--mut)}
+#panel{position:absolute;right:8px;top:56px;width:min(340px,calc(100% - 16px));max-height:calc(100% - 120px);overflow:auto;background:var(--bg);border:1px solid #3d4d52;border-radius:8px;padding:12px;z-index:3}
+#panel[hidden]{display:none}
+label{display:block;margin:8px 0 2px;font-size:13px;color:var(--mut)}
+input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid #3d4d52;border-radius:6px;font:inherit}
+#msg{position:absolute;left:8px;bottom:calc(24px + env(safe-area-inset-bottom,0));max-width:calc(100% - 16px);background:var(--bg);padding:7px 11px;border-radius:6px;z-index:2;display:none}
+.maplibregl-map{position:relative;overflow:hidden;font:12px sans-serif}
+.maplibregl-canvas{position:absolute;left:0;top:0}
+.maplibregl-canvas-container.maplibregl-interactive{cursor:grab}
+.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{position:absolute;bottom:0;z-index:2}
+.maplibregl-ctrl-bottom-right{right:0}
+.maplibregl-popup{position:absolute;top:0;left:0;pointer-events:none;will-change:transform;display:flex}
+.maplibregl-popup-anchor-bottom{flex-direction:column-reverse}
+.maplibregl-popup-content{background:var(--bg);color:var(--fg);padding:10px 14px;border-radius:6px;pointer-events:auto;position:relative}
+.maplibregl-popup-close-button{position:absolute;right:0;top:0;border:0;background:none;color:var(--fg);font-size:18px}
+.maplibregl-popup-tip{width:0;height:0;border:10px solid transparent;align-self:center}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip{border-top-color:var(--bg);border-bottom:none}
+.maplibregl-popup-anchor-top .maplibregl-popup-tip{border-bottom-color:var(--bg);border-top:none}
+.maplibregl-ctrl-attrib{background:rgba(255,255,255,.7);color:#333;padding:0 4px;font-size:11px}
+.maplibregl-ctrl-attrib a{color:#333}
+</style></head><body>
+<div id="map"></div>
+<div id="bar">
+ <button data-m="Point">Punkt</button><button data-m="LineString">Linie</button><button data-m="Polygon">Fläche</button>
+ <button id="exp">Export</button><button id="imp">Import</button><button id="cfgb">Einstellungen</button>
+ <span id="st">offline</span>
+</div>
+<div id="panel" hidden>
+ <label>Supabase URL</label><input id="sbUrl" placeholder="https://xyz.supabase.co">
+ <label>Supabase anon key</label><input id="sbKey">
+ <label>PMTiles-URL (Vektor oder Raster)</label><input id="pm" placeholder="https://…/hoehlen.pmtiles">
+ <label>FlatGeobuf-URL</label><input id="fgb" placeholder="https://…/karst.fgb">
+ <p><button id="save">Speichern &amp; neu laden</button></p>
+</div>
+<div id="msg"></div>
+<input type="file" id="file" accept=".geojson,.json" hidden>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pmtiles@3.0.6/dist/pmtiles.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatgeobuf@3.36.0/dist/flatgeobuf-geojson.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const cfg=JSON.parse(localStorage.getItem('speleo-cfg')||'{}');
+['sbUrl','sbKey','pm','fgb'].forEach(k=>$(k).value=cfg[k]||'');
+$('cfgb').onclick=()=>$('panel').hidden=!$('panel').hidden;
+$('save').onclick=()=>{['sbUrl','sbKey','pm','fgb'].forEach(k=>cfg[k]=$(k).value.trim());localStorage.setItem('speleo-cfg',JSON.stringify(cfg));location.reload()};
+let mt;const msg=t=>{const m=$('msg');m.textContent=t;m.style.display='block';clearTimeout(mt);mt=setTimeout(()=>m.style.display='none',5000)};
+
+/* ---------- IndexedDB (Offline-first) ---------- */
+const dbp=new Promise((ok,no)=>{const r=indexedDB.open('speleogis',1);r.onupgradeneeded=()=>r.result.createObjectStore('f',{keyPath:'id'});r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
+const tx=async(mode,fn)=>{const d=await dbp;return new Promise((ok,no)=>{const t=d.transaction('f',mode);const q=fn(t.objectStore('f'));t.oncomplete=()=>ok(q&&q.result);t.onerror=()=>no(t.error)})};
+const feats=new Map();
+const ts=s=>Date.parse(s)||0;
+
+/* ---------- Karte ---------- */
+const proto=new pmtiles.Protocol();maplibregl.addProtocol('pmtiles',proto.tile);
+const map=new maplibregl.Map({container:'map',center:[8.2,46.8],zoom:7,style:{version:8,
+ sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,maxzoom:19,attribution:'© OpenStreetMap'}},
+ layers:[{id:'osm',type:'raster',source:'osm'}]}});
+map.addControl(new maplibregl.NavigationControl(),'bottom-right');
+map.addControl(new maplibregl.GeolocateControl({trackUserLocation:true}),'bottom-right');
+
+const G=t=>['==',['geometry-type'],t];
+function addVec(prefix,source,color,srcLayer){
+ const sl=srcLayer?{'source-layer':srcLayer}:{};
+ map.addLayer({id:prefix+'-f',type:'fill',source,...sl,filter:['in',['geometry-type'],['literal',['Polygon','MultiPolygon']]],paint:{'fill-color':color,'fill-opacity':.3}},'edit-f');
+ map.addLayer({id:prefix+'-l',type:'line',source,...sl,filter:['!=',['geometry-type'],'Point'],paint:{'line-color':color,'line-width':2}},'edit-f');
+ map.addLayer({id:prefix+'-p',type:'circle',source,...sl,filter:['in',['geometry-type'],['literal',['Point','MultiPoint']]],paint:{'circle-color':color,'circle-radius':5,'circle-stroke-width':1,'circle-stroke-color':'#fff'}},'edit-f');
+}
+const empty={type:'FeatureCollection',features:[]};
+map.on('load',async()=>{
+ map.addSource('edit',{type:'geojson',data:empty});map.addSource('draft',{type:'geojson',data:empty});map.addSource('fgb',{type:'geojson',data:empty});
+ map.addLayer({id:'edit-f',type:'fill',source:'edit',filter:['in',['geometry-type'],['literal',['Polygon','MultiPolygon']]],paint:{'fill-color':'#e0a43a','fill-opacity':.35}});
+ map.addLayer({id:'edit-l',type:'line',source:'edit',filter:['!=',['geometry-type'],'Point'],paint:{'line-color':'#e0a43a','line-width':3}});
+ map.addLayer({id:'edit-p',type:'circle',source:'edit',filter:['in',['geometry-type'],['literal',['Point','MultiPoint']]],paint:{'circle-color':'#e0a43a','circle-radius':7,'circle-stroke-width':2,'circle-stroke-color':'#1f2a2e'}});
+ map.addLayer({id:'draft-l',type:'line',source:'draft',paint:{'line-color':'#fff','line-dasharray':[2,2],'line-width':2}});
+ map.addLayer({id:'draft-p',type:'circle',source:'draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-color':'#fff','circle-radius':4}});
+ addVec('fgb','fgb','#4aa3d9');
+ if(cfg.pm)loadPM(cfg.pm).catch(e=>msg('PMTiles: '+e.message));
+ if(cfg.fgb){loadFGB();map.on('moveend',loadFGB)}
+ for(const f of await tx('readonly',s=>s.getAll()))feats.set(f.id,f);
+ refresh();initSB();
+});
+
+async function loadPM(url){
+ const p=new pmtiles.PMTiles(url);proto.add(p);const h=await p.getHeader();
+ if(h.tileType===1){
+  map.addSource('pm',{type:'vector',url:'pmtiles://'+url});
+  const m=await p.getMetadata();
+  for(const l of(m.vector_layers||[]))addVec('pm-'+l.id,'pm','#6cc27a',l.id);
+ }else{
+  map.addSource('pm',{type:'raster',url:'pmtiles://'+url,tileSize:256});
+  map.addLayer({id:'pm-r',type:'raster',source:'pm'},'edit-f');
+ }
+ if(h.maxLon)map.fitBounds([[h.minLon,h.minLat],[h.maxLon,h.maxLat]],{padding:40,duration:0});
+}
+let fgbBusy=false;
+async function loadFGB(){
+ if(fgbBusy||map.getZoom()<9){if(map.getZoom()<9)map.getSource('fgb').setData(empty);return}
+ fgbBusy=true;const b=map.getBounds(),fc={type:'FeatureCollection',features:[]};
+ try{for await(const f of flatgeobuf.deserialize(cfg.fgb,{minX:b.getWest(),minY:b.getSouth(),maxX:b.getEast(),maxY:b.getNorth()}))fc.features.push(f);map.getSource('fgb').setData(fc)}
+ catch(e){msg('FlatGeobuf: '+e.message)}
+ fgbBusy=false;
+}
+
+/* ---------- Daten & Sync ---------- */
+function refresh(){
+ map.getSource('edit').setData({type:'FeatureCollection',features:[...feats.values()].filter(f=>!f.deleted).map(f=>({type:'Feature',id:undefined,geometry:f.geometry,properties:{...f.props,_id:f.id}}))});
+ const n=[...feats.values()].filter(f=>f.dirty).length;
+ $('st').textContent=(sb?(live?'live':'verbunden'):'lokal')+(n?` · ${n} offen`:'');
+}
+async function save(f){f.updated_at=new Date().toISOString();f.dirty=1;feats.set(f.id,f);await tx('readwrite',s=>s.put(f));refresh();push(f)}
+let sb,live=false;
+async function push(f){
+ if(!sb||!navigator.onLine)return;
+ const{error}=await sb.from('features').upsert({id:f.id,geom:f.geometry,props:f.props,updated_at:f.updated_at,deleted:!!f.deleted});
+ if(error){msg('Sync: '+error.message);return}
+ if(feats.get(f.id)?.updated_at===f.updated_at){f.dirty=0;await tx('readwrite',s=>s.put(f));refresh()}
+}
+async function applyRemote(r){
+ const l=feats.get(r.id);
+ if(l&&l.dirty&&ts(l.updated_at)>ts(r.updated_at))return;
+ const f={id:r.id,geometry:r.geom,props:r.props||{},updated_at:r.updated_at,deleted:!!r.deleted,dirty:0};
+ feats.set(f.id,f);await tx('readwrite',s=>s.put(f));
+}
+async function sync(){
+ if(!sb)return;
+ const{data,error}=await sb.from('features').select('*');
+ if(error){msg('Sync: '+error.message);return}
+ for(const r of data)await applyRemote(r);
+ for(const f of feats.values())if(f.dirty)await push(f);
+ refresh();
+}
+function initSB(){
+ if(!cfg.sbUrl||!cfg.sbKey)return;
+ sb=supabase.createClient(cfg.sbUrl,cfg.sbKey);
+ sb.channel('features').on('postgres_changes',{event:'*',schema:'public',table:'features'},async p=>{if(p.new?.id){await applyRemote(p.new);refresh()}})
+  .subscribe(s=>{live=s==='SUBSCRIBED';refresh()});
+ sync();addEventListener('online',sync);
+}
+
+/* ---------- Zeichnen ---------- */
+let mode=null,pts=[];
+document.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{
+ const m=b.dataset.m===mode?null:b.dataset.m;setMode(m)});
+function setMode(m){
+ mode=m;pts=[];drawDraft();
+ document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('on',b.dataset.m===m));
+ m?map.doubleClickZoom.disable():map.doubleClickZoom.enable();
+ if(m&&m!=='Point')msg('Tippen setzt Punkte, Doppeltippen beendet.');
+}
+function drawDraft(){
+ const f=[];
+ if(pts.length>1)f.push({type:'Feature',geometry:{type:'LineString',coordinates:pts},properties:{}});
+ pts.forEach(c=>f.push({type:'Feature',geometry:{type:'Point',coordinates:c},properties:{}}));
+ map.getSource('draft').setData({type:'FeatureCollection',features:f});
+}
+async function finish(){
+ const ok=mode==='Point'||(mode==='LineString'&&pts.length>1)||(mode==='Polygon'&&pts.length>2);
+ if(ok){
+  const name=prompt('Name / Beschreibung','')??null;
+  if(name!==null){
+   const geometry=mode==='Point'?{type:'Point',coordinates:pts[0]}:mode==='LineString'?{type:'LineString',coordinates:pts}:{type:'Polygon',coordinates:[[...pts,pts[0]]]};
+   await save({id:crypto.randomUUID(),geometry,props:{name,typ:mode}});
+  }
+ }
+ setMode(null);
+}
+map.on('click',e=>{
+ if(mode){pts.push([e.lngLat.lng,e.lngLat.lat]);mode==='Point'?finish():drawDraft();return}
+ const hit=map.queryRenderedFeatures(e.point,{layers:['edit-p','edit-l','edit-f']})[0];
+ if(!hit)return;
+ const id=hit.properties._id;
+ const el=document.createElement('div');
+ el.innerHTML=`<b></b><br><button>Löschen</button>`;
+ el.querySelector('b').textContent=hit.properties.name||'(ohne Namen)';
+ el.querySelector('button').onclick=async()=>{const f=feats.get(id);f.deleted=true;await save(f);pop.remove()};
+ const pop=new maplibregl.Popup().setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+});
+map.on('dblclick',e=>{if(mode&&mode!=='Point'){e.preventDefault();pts.pop();finish()}});
+
+/* ---------- Export / Import (QField) ---------- */
+$('exp').onclick=()=>{
+ const fc={type:'FeatureCollection',name:'speleogis',features:[...feats.values()].filter(f=>!f.deleted).map(f=>({type:'Feature',geometry:f.geometry,properties:{id:f.id,base:f.updated_at,...f.props}}))};
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(fc)],{type:'application/geo+json'}));
+ a.download='speleogis-'+new Date().toISOString().slice(0,10)+'.geojson';a.click();msg(fc.features.length+' Objekte exportiert');
+};
+$('imp').onclick=()=>$('file').click();
+$('file').onchange=async e=>{
+ const file=e.target.files[0];if(!file)return;
+ let fc;try{fc=JSON.parse(await file.text())}catch{msg('Keine gültige GeoJSON-Datei');return}
+ let added=0,updated=0,conflicts=0;
+ for(const x of fc.features||[]){
+  const{id,base,...props}=x.properties||{};
+  const l=id&&feats.get(id);
+  if(!l){await save({id:id||crypto.randomUUID(),geometry:x.geometry,props});added++;continue}
+  if(JSON.stringify(l.geometry)===JSON.stringify(x.geometry)&&JSON.stringify(l.props)===JSON.stringify(props))continue;
+  if(ts(l.updated_at)<=ts(base)){l.geometry=x.geometry;l.props=props;l.deleted=false;await save(l);updated++}
+  else{ // beide Seiten geändert: Merge
+   l.props={...l.props,...props};
+   if(l.deleted)l.deleted=false;
+   await save(l);conflicts++;
+  }
+ }
+ e.target.value='';msg(`Import: ${added} neu, ${updated} aktualisiert, ${conflicts} gemergt (Attribute aus Import, Geometrie lokal)`);
+};
+
+/* ---------- PWA ---------- */
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script></body></html>
