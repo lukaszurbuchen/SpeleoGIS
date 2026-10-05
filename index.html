@@ -22,8 +22,11 @@ button{font:inherit;background:var(--bg);color:var(--fg);border:1px solid #3d4d5
 button.on{background:var(--ac);color:#1f2a2e;border-color:var(--ac)}
 button:focus-visible,input:focus-visible{outline:2px solid var(--ac)}
 #st{align-self:center;background:var(--bg);padding:5px 9px;border-radius:6px;font-size:13px;color:var(--mut)}
-#panel{position:absolute;right:8px;top:56px;width:min(340px,calc(100% - 16px));max-height:calc(100% - 120px);overflow:auto;background:var(--bg);border:1px solid #3d4d52;border-radius:8px;padding:12px;z-index:3}
-#panel[hidden]{display:none}
+#panel,#lpanel{position:absolute;right:8px;top:56px;width:min(340px,calc(100% - 16px));max-height:calc(100% - 120px);overflow:auto;background:var(--bg);border:1px solid #3d4d52;border-radius:8px;padding:12px;z-index:3}
+#panel[hidden],#lpanel[hidden]{display:none}
+label.c{display:flex;align-items:center;gap:8px;color:var(--fg);font-size:15px;margin:10px 0}
+input[type=checkbox]{width:auto;accent-color:var(--ac)}
+.ib{margin:0 0 8px;padding-bottom:6px;border-bottom:1px solid #3d4d52}.ib small{color:var(--mut)}.ib table{border-collapse:collapse}.ib td{padding:1px 8px 1px 0;vertical-align:top;font-size:13px}.ib td:first-child{color:var(--mut)}
 label{display:block;margin:8px 0 2px;font-size:13px;color:var(--mut)}
 input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid #3d4d52;border-radius:6px;font:inherit}
 #msg{position:absolute;left:8px;bottom:calc(24px + env(safe-area-inset-bottom,0));max-width:calc(100% - 16px);background:var(--bg);padding:7px 11px;border-radius:6px;z-index:2;display:none}
@@ -45,7 +48,7 @@ input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid
 <div id="map"></div>
 <div id="bar">
  <button data-m="Point">Punkt</button><button data-m="LineString">Linie</button><button data-m="Polygon">Fläche</button>
- <button id="exp">Export</button><button id="imp">Import</button><button id="cfgb">Einstellungen</button>
+ <button id="exp">Export</button><button id="imp">Import</button><button id="lyr">Ebenen</button><button id="cfgb">Einstellungen</button>
  <span id="st">offline</span>
 </div>
 <div id="panel" hidden>
@@ -55,6 +58,7 @@ input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid
  <label>FlatGeobuf-URLs (durch Leerzeichen getrennt)</label><input id="fgb" placeholder="https://…/karst.fgb">
  <p><button id="save">Speichern &amp; neu laden</button></p>
 </div>
+<div id="lpanel" hidden></div>
 <div id="msg"></div>
 <input type="file" id="file" accept=".geojson,.json" hidden>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -67,7 +71,8 @@ const DEF={pm:'data/drohnenortho.pmtiles',fgb:'data/zonen.fgb data/sgh_verzeichn
 const cfg={...DEF,...JSON.parse(localStorage.getItem('speleo-cfg')||'{}')};
 const fgbs=(cfg.fgb||'').split(/[\s,]+/).filter(Boolean);
 ['sbUrl','sbKey','pm','fgb'].forEach(k=>$(k).value=cfg[k]||'');
-$('cfgb').onclick=()=>$('panel').hidden=!$('panel').hidden;
+$('cfgb').onclick=()=>{$('lpanel').hidden=true;$('panel').hidden=!$('panel').hidden};
+$('lyr').onclick=()=>{$('panel').hidden=true;$('lpanel').hidden=!$('lpanel').hidden};
 $('save').onclick=()=>{['sbUrl','sbKey','pm','fgb'].forEach(k=>cfg[k]=$(k).value.trim());localStorage.setItem('speleo-cfg',JSON.stringify(cfg));location.reload()};
 let mt;const msg=t=>{const m=$('msg');m.textContent=t;m.style.display='block';clearTimeout(mt);mt=setTimeout(()=>m.style.display='none',5000)};
 
@@ -93,6 +98,11 @@ function addVec(prefix,source,color,srcLayer){
  map.addLayer({id:prefix+'-p',type:'circle',source,...sl,filter:['in',['geometry-type'],['literal',['Point','MultiPoint']]],paint:{'circle-color':color,'circle-radius':5,'circle-stroke-width':1,'circle-stroke-color':'#fff'}},'edit-f');
 }
 const empty={type:'FeatureCollection',features:[]};
+const GR=[['Basiskarte (OSM)','osm'],['Orthofoto','pm'],...fgbs.map((u,i)=>[u.split('/').pop().replace(/\.fgb$/,'').replace(/_/g,' '),'fgb'+i]),['Eigene Edits','edit']];
+const inGr=(id,p)=>id===p||id.startsWith(p+'-');
+function vis(p,on){for(const l of map.getStyle().layers)if(inGr(l.id,p))map.setLayoutProperty(l.id,'visibility',on?'visible':'none')}
+GR.forEach(([n,p])=>{const l=document.createElement('label');l.className='c';l.innerHTML='<input type="checkbox" checked><span></span>';
+ l.querySelector('span').textContent=n;l.querySelector('input').onchange=e=>vis(p,e.target.checked);$('lpanel').appendChild(l)});
 map.on('load',async()=>{
  map.addSource('edit',{type:'geojson',data:empty});map.addSource('draft',{type:'geojson',data:empty});map.addSource('fgb',{type:'geojson',data:empty});
  map.addLayer({id:'edit-f',type:'fill',source:'edit',filter:['in',['geometry-type'],['literal',['Polygon','MultiPolygon']]],paint:{'fill-color':'#e0a43a','fill-opacity':.35}});
@@ -115,7 +125,7 @@ async function loadPM(url){
   for(const l of(m.vector_layers||[]))addVec('pm-'+l.id,'pm','#6cc27a',l.id);
  }else{
   map.addSource('pm',{type:'raster',url:'pmtiles://'+url,tileSize:256});
-  map.addLayer({id:'pm-r',type:'raster',source:'pm'},'edit-f');
+  map.addLayer({id:'pm-r',type:'raster',source:'pm'},map.getLayer('fgb0-f')?'fgb0-f':'edit-f');
  }
  if(h.maxLon)map.fitBounds([[h.minLon,h.minLat],[h.maxLon,h.maxLat]],{padding:40,duration:0});
 }
@@ -195,14 +205,25 @@ async function finish(){
 }
 map.on('click',e=>{
  if(mode){pts.push([e.lngLat.lng,e.lngLat.lat]);mode==='Point'?finish():drawDraft();return}
- const hit=map.queryRenderedFeatures(e.point,{layers:['edit-p','edit-l','edit-f']})[0];
- if(!hit)return;
- const id=hit.properties._id;
- const el=document.createElement('div');
- el.innerHTML=`<b></b><br><button>Löschen</button>`;
- el.querySelector('b').textContent=hit.properties.name||'(ohne Namen)';
- el.querySelector('button').onclick=async()=>{const f=feats.get(id);f.deleted=true;await save(f);pop.remove()};
- const pop=new maplibregl.Popup().setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+ const r=8,bb=[[e.point.x-r,e.point.y-r],[e.point.x+r,e.point.y+r]];
+ const ids=map.getStyle().layers.map(l=>l.id).filter(id=>id!=='pm-r'&&GR.some(([,p])=>p!=='osm'&&inGr(id,p))&&map.getLayoutProperty(id,'visibility')!=='none');
+ const hits=map.queryRenderedFeatures(bb,{layers:ids});
+ const seen=new Set(),list=[];
+ for(const h of hits){const k=h.layer.id.replace(/-[fpl]$/,'')+'|'+(h.properties._id||JSON.stringify(h.properties));if(!seen.has(k)){seen.add(k);list.push(h)}if(list.length>=5)break}
+ if(!list.length)return;
+ const el=document.createElement('div');el.style.cssText='max-height:50vh;overflow:auto;max-width:280px';
+ for(const h of list){
+  const g=GR.find(([,p])=>inGr(h.layer.id,p)),d=document.createElement('div');d.className='ib';
+  const t=document.createElement('small');t.textContent=g?g[0]:h.layer.id;d.appendChild(t);
+  const tb=document.createElement('table');
+  for(const[k,v]of Object.entries(h.properties)){if(k==='_id'||v===''||v===null||v==='null')continue;
+   const tr=tb.insertRow();tr.insertCell().textContent=k;tr.insertCell().textContent=v}
+  d.appendChild(tb);
+  if(h.properties._id){const id=h.properties._id,bt=document.createElement('button');bt.textContent='Löschen';bt.style.marginTop='6px';
+   bt.onclick=async()=>{const f=feats.get(id);f.deleted=true;await save(f);pop.remove()};d.appendChild(bt)}
+  el.appendChild(d);
+ }
+ const pop=new maplibregl.Popup({maxWidth:'300px'}).setLngLat(e.lngLat).setDOMContent(el).addTo(map);
 });
 map.on('dblclick',e=>{if(mode&&mode!=='Point'){e.preventDefault();pts.pop();finish()}});
 
