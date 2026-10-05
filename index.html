@@ -52,7 +52,7 @@ input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid
  <label>Supabase URL</label><input id="sbUrl" placeholder="https://xyz.supabase.co">
  <label>Supabase anon key</label><input id="sbKey">
  <label>PMTiles-URL (Vektor oder Raster)</label><input id="pm" placeholder="https://…/hoehlen.pmtiles">
- <label>FlatGeobuf-URL</label><input id="fgb" placeholder="https://…/karst.fgb">
+ <label>FlatGeobuf-URLs (durch Leerzeichen getrennt)</label><input id="fgb" placeholder="https://…/karst.fgb">
  <p><button id="save">Speichern &amp; neu laden</button></p>
 </div>
 <div id="msg"></div>
@@ -63,7 +63,9 @@ input{width:100%;padding:7px;background:#16201f;color:var(--fg);border:1px solid
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-const cfg=JSON.parse(localStorage.getItem('speleo-cfg')||'{}');
+const DEF={pm:'data/drohnenortho.pmtiles',fgb:'data/zonen.fgb data/sgh_verzeichnis.fgb data/hoehleninventar.fgb'};
+const cfg={...DEF,...JSON.parse(localStorage.getItem('speleo-cfg')||'{}')};
+const fgbs=(cfg.fgb||'').split(/[\s,]+/).filter(Boolean);
 ['sbUrl','sbKey','pm','fgb'].forEach(k=>$(k).value=cfg[k]||'');
 $('cfgb').onclick=()=>$('panel').hidden=!$('panel').hidden;
 $('save').onclick=()=>{['sbUrl','sbKey','pm','fgb'].forEach(k=>cfg[k]=$(k).value.trim());localStorage.setItem('speleo-cfg',JSON.stringify(cfg));location.reload()};
@@ -77,7 +79,7 @@ const ts=s=>Date.parse(s)||0;
 
 /* ---------- Karte ---------- */
 const proto=new pmtiles.Protocol();maplibregl.addProtocol('pmtiles',proto.tile);
-const map=new maplibregl.Map({container:'map',center:[8.2,46.8],zoom:7,style:{version:8,
+const map=new maplibregl.Map({container:'map',center:[9.343,47.168],zoom:14,style:{version:8,
  sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,maxzoom:19,attribution:'© OpenStreetMap'}},
  layers:[{id:'osm',type:'raster',source:'osm'}]}});
 map.addControl(new maplibregl.NavigationControl(),'bottom-right');
@@ -98,9 +100,9 @@ map.on('load',async()=>{
  map.addLayer({id:'edit-p',type:'circle',source:'edit',filter:['in',['geometry-type'],['literal',['Point','MultiPoint']]],paint:{'circle-color':'#e0a43a','circle-radius':7,'circle-stroke-width':2,'circle-stroke-color':'#1f2a2e'}});
  map.addLayer({id:'draft-l',type:'line',source:'draft',paint:{'line-color':'#fff','line-dasharray':[2,2],'line-width':2}});
  map.addLayer({id:'draft-p',type:'circle',source:'draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-color':'#fff','circle-radius':4}});
- addVec('fgb','fgb','#4aa3d9');
+ fgbs.forEach((u,i)=>{map.addSource('fgb'+i,{type:'geojson',data:empty});addVec('fgb'+i,'fgb'+i,['#4aa3d9','#c8553d','#9b7ede'][i%3])});
  if(cfg.pm)loadPM(cfg.pm).catch(e=>msg('PMTiles: '+e.message));
- if(cfg.fgb){loadFGB();map.on('moveend',loadFGB)}
+ if(fgbs.length){loadFGB();map.on('moveend',loadFGB)}
  for(const f of await tx('readonly',s=>s.getAll()))feats.set(f.id,f);
  refresh();initSB();
 });
@@ -119,10 +121,12 @@ async function loadPM(url){
 }
 let fgbBusy=false;
 async function loadFGB(){
- if(fgbBusy||map.getZoom()<9){if(map.getZoom()<9)map.getSource('fgb').setData(empty);return}
- fgbBusy=true;const b=map.getBounds(),fc={type:'FeatureCollection',features:[]};
- try{for await(const f of flatgeobuf.deserialize(cfg.fgb,{minX:b.getWest(),minY:b.getSouth(),maxX:b.getEast(),maxY:b.getNorth()}))fc.features.push(f);map.getSource('fgb').setData(fc)}
- catch(e){msg('FlatGeobuf: '+e.message)}
+ if(fgbBusy)return;fgbBusy=true;const b=map.getBounds(),r={minX:b.getWest(),minY:b.getSouth(),maxX:b.getEast(),maxY:b.getNorth()};
+ for(const[i,u]of fgbs.entries()){
+  const fc={type:'FeatureCollection',features:[]};
+  try{for await(const f of flatgeobuf.deserialize(u,r))fc.features.push(f);map.getSource('fgb'+i).setData(fc)}
+  catch(e){msg('FlatGeobuf: '+e.message)}
+ }
  fgbBusy=false;
 }
 
